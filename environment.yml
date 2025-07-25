@@ -1,0 +1,14 @@
+name: eRASS_XLF
+channels:
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - astropy
+  - ipykernel
+  - matplotlib
+  - numpy
+  - pandas
+  - pip
+  - python>=3
+  - scipy
+
