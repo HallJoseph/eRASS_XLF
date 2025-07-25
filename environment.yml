@@ -11,4 +11,5 @@ dependencies:
   - pip
   - python>=3
   - scipy
+  - tabulate
 
