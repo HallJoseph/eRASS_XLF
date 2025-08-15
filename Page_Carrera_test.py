@@ -1,3 +1,5 @@
+
+# %% imports
 import numpy as np
 import tqdm
 from scipy.integrate import dblquad
@@ -6,6 +8,9 @@ from astropy.cosmology import Planck18 as cosmo
 from scipy.interpolate import NearestNDInterpolator as NearND
 import pandas as pd
 from astropy import units as u
+import matplotlib.pyplot as plt
+# %%
+# Page & Carrera method for calculating X-ray luminosity function (XLF)
 
 # Load Koens data; Lx_z contains Lx and z values for sample
 # sf_flux contains flux and coverage for selection function
@@ -32,7 +37,8 @@ num_bins = 15
 bin_edges = np.logspace(np.log10(Lx_mask.min()*0.9), np.log10(Lx_mask.max()*1.1), num_bins + 1)
 
 # Create an interpolator for the luminosity distance and comoving volume over full z range
-z_fullrange = np.arange(0.02, 0.31, 0.01) # np.arange ignores upper point so put 0.31
+# Extended upper z range to ensure 0.3 covered by caching as well
+z_fullrange = np.arange(0.02, 0.33, 0.01)
 co_mo_vol_range = cosmo.differential_comoving_volume(z_fullrange).value
 co_mo_vol_range_interp = interp1d(z_fullrange, co_mo_vol_range)
 DL_cm_range = cosmo.luminosity_distance(z_fullrange).to(u.cm).value
@@ -58,16 +64,66 @@ def pc_integrand(z, Luminosity):
     return (coverage_interp * co_mo_vol_step)
 
 # Calculate the Page & Carrera method's phi for each bin
+# HACK: Use caching so to avoid recomputing similar values
+# TODO: Check impact of number of cache points, is it precise enough?
+# Set number of points for caching z and Lx 
+cache_z_grid_points = 100  
+cache_Lx_grid_points = 100  
+
+# Cache interpolator results for z and Lx
+# Create meshgrid for Lx and z for caching
+cache_z = np.linspace(0.02, 0.31, cache_z_grid_points)
+cache_Lx = np.logspace(np.log10(Lx_mask.min()), np.log10(Lx_mask.max()), cache_Lx_grid_points)
+cache_Lx_grid, cache_z_grid = np.meshgrid(cache_Lx, cache_z)
+cache_kcorr = kcorr_interp(cache_Lx_grid, cache_z_grid)
+cache_DL_cm = DL_cm_range_interp(cache_z)
+cache_co_mo_vol = co_mo_vol_range_interp(cache_z)
+
+# Helper function to get cached kcorr value
+def get_kcorr_cached(Lx, z):
+    """
+    Return cached kcorr value for given Lx and z by nearest neighbor lookup.
+    """
+    i = np.abs(cache_Lx - Lx).argmin()
+    j = np.abs(cache_z - z).argmin()
+    return cache_kcorr[j, i]
+
+# Helper function to get cached DL_cm and co_mo_vol
+def get_DL_cm_cached(z):
+    j = np.abs(cache_z - z).argmin()
+    return cache_DL_cm[j]
+def get_co_mo_vol_cached(z):
+    j = np.abs(cache_z - z).argmin()
+    return cache_co_mo_vol[j]
+
+# HACK: Increase integration tolerances for dblquad, check impact
+integration_opts = dict(epsabs=1e-2, epsrel=1e-2)  
+
 pc_phis = []
 pc_deltas = []
 for i, lower_bin_edge in enumerate(tqdm.tqdm(bin_edges[:-1])):
     upper_bin_edge = bin_edges[i+1]
     indecis_in_bin = np.where((lower_bin_edge <= Lx_mask) & (Lx_mask < upper_bin_edge))[0]
+    clust_in_bin = len(indecis_in_bin)
     delta_L = upper_bin_edge - lower_bin_edge
     pc_deltas.append(delta_L)
     # Integrate over the bin edges and z range 0.02 to 0.3
-    pc_denoms, pc_denoms_err = dblquad(pc_integrand, lower_bin_edge, upper_bin_edge, 0.02, 0.3)
-    clust_in_bin = len(indecis_in_bin)
+    def pc_integrand_fast(z, Luminosity):
+        """
+        Fast integrand using cached interpolator results.
+        """
+        co_mo_vol_step = get_co_mo_vol_cached(z)
+        DL_cm_step = get_DL_cm_cached(z)
+        kcorr_val = get_kcorr_cached(Luminosity, z)
+        flux = (Luminosity / (4 * np.pi * DL_cm_step**2)) * kcorr_val
+        flim = 6.5e-14
+        if flux >= flim:
+            coverage_interp = coverage_interp1d(flux)
+        else:
+            coverage_interp = 0
+        return (coverage_interp * co_mo_vol_step)
+    # Use increased tolerances for faster integration
+    pc_denoms, pc_denoms_err = dblquad(pc_integrand_fast, lower_bin_edge, upper_bin_edge, 0.02, 0.3, **integration_opts)
     pc_phi = clust_in_bin / pc_denoms
     pc_phis.append(pc_phi)
     
@@ -82,15 +138,19 @@ pc_df = pd.DataFrame({
 })
 pc_df.to_csv('results_carrera_xlf.csv', index=False)
 
-# plotting the results
-import matplotlib.pyplot as plt
+# %% plotting the results
+
+# Load results to avoid recalculating
+pc_df = pd.read_csv('results_carrera_xlf.csv')
+
 plt.figure(figsize=(10, 6))
 plt.scatter(pc_df['bin_centre'], pc_df['phi'], label='Page & Carrera Method', color='blue', marker='o')
 plt.xscale('log')
 plt.xlabel('Luminosity (erg/s)')
 plt.ylabel('Phi (Mpc^-3 dex^-1)')
-plt.title('X-ray Luminosity Function using Page & Carrera Method')
+plt.yscale('log')
 plt.legend()
 plt.grid()
 plt.savefig('xlf_page_carrera.png')
 plt.show()
+# %%
